@@ -3,6 +3,7 @@ Backpack Exchange API Client
 Handles authentication and API requests to Backpack Exchange.
 
 Uses ED25519 signature authentication as per Backpack Exchange API specification.
+Supports WebSocket connections for real-time market data.
 """
 
 import base64
@@ -10,7 +11,9 @@ import json
 import time
 import logging
 import requests
-from typing import Dict, Any, Optional
+import websocket
+import threading
+from typing import Dict, Any, Optional, Callable
 from urllib.parse import urlencode
 
 try:
@@ -288,3 +291,215 @@ class BackpackAPI:
         
         # API returns a list of cancelled orders
         return result if isinstance(result, list) else []
+
+
+class BackpackWebSocket:
+    """
+    WebSocket client for real-time market data from Backpack Exchange.
+    Connects to wss://ws.backpack.exchange/
+    """
+    
+    def __init__(self, on_message: Callable = None, on_error: Callable = None):
+        """
+        Initialize WebSocket client.
+        
+        Args:
+            on_message: Callback function for incoming messages
+            on_error: Callback function for errors
+        """
+        self.ws_url = "wss://ws.backpack.exchange/"
+        self.ws = None
+        self.thread = None
+        self.running = False
+        self.subscriptions = []
+        self.latest_ticker = {}
+        
+        self.on_message_callback = on_message
+        self.on_error_callback = on_error
+        
+        logger.info("Backpack WebSocket client initialized")
+    
+    def connect(self):
+        """Establish WebSocket connection."""
+        if self.running:
+            logger.warning("WebSocket already connected")
+            return
+        
+        self.running = True
+        self.ws = websocket.WebSocketApp(
+            self.ws_url,
+            on_open=self._on_open,
+            on_message=self._on_message,
+            on_error=self._on_error,
+            on_close=self._on_close
+        )
+        
+        # Run WebSocket in separate thread
+        self.thread = threading.Thread(target=self.ws.run_forever, daemon=True)
+        self.thread.start()
+        
+        logger.info(f"WebSocket connecting to {self.ws_url}")
+    
+    def disconnect(self):
+        """Close WebSocket connection."""
+        if not self.running:
+            return
+        
+        self.running = False
+        if self.ws:
+            self.ws.close()
+        
+        logger.info("WebSocket disconnected")
+    
+    def subscribe_ticker(self, symbol: str):
+        """
+        Subscribe to ticker updates for a symbol.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., "SOL_USDC")
+        """
+        if not self.running:
+            logger.error("WebSocket not connected. Call connect() first.")
+            return
+        
+        # Backpack WebSocket subscription format
+        subscribe_msg = {
+            "method": "SUBSCRIBE",
+            "params": [f"ticker.{symbol}"]
+        }
+        
+        self.ws.send(json.dumps(subscribe_msg))
+        self.subscriptions.append(symbol)
+        
+        logger.info(f"Subscribed to ticker updates for {symbol}")
+    
+    def unsubscribe_ticker(self, symbol: str):
+        """
+        Unsubscribe from ticker updates.
+        
+        Args:
+            symbol: Trading pair symbol
+        """
+        if not self.running:
+            return
+        
+        unsubscribe_msg = {
+            "method": "UNSUBSCRIBE",
+            "params": [f"ticker.{symbol}"]
+        }
+        
+        self.ws.send(json.dumps(unsubscribe_msg))
+        if symbol in self.subscriptions:
+            self.subscriptions.remove(symbol)
+        
+        logger.info(f"Unsubscribed from ticker updates for {symbol}")
+    
+    def get_latest_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the latest ticker data for a symbol.
+        
+        Args:
+            symbol: Trading pair symbol
+            
+        Returns:
+            Latest ticker data or None if not available
+        """
+        return self.latest_ticker.get(symbol)
+    
+    def _on_open(self, ws):
+        """WebSocket connection opened."""
+        logger.info("WebSocket connection established")
+    
+    def _on_message(self, ws, message):
+        """
+        Handle incoming WebSocket message.
+        
+        Args:
+            ws: WebSocket instance
+            message: Raw message string
+        """
+        try:
+            data = json.loads(message)
+            
+            # Check if it's a ticker update
+            if isinstance(data, dict) and 'stream' in data:
+                stream = data.get('stream', '')
+                if stream.startswith('ticker.'):
+                    symbol = stream.replace('ticker.', '')
+                    ticker_data = data.get('data', {})
+                    
+                    # Store latest ticker
+                    self.latest_ticker[symbol] = ticker_data
+                    
+                    logger.debug(f"Ticker update for {symbol}: {ticker_data.get('lastPrice', 'N/A')}")
+            
+            # Call custom callback if provided
+            if self.on_message_callback:
+                self.on_message_callback(data)
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse WebSocket message: {e}")
+        except Exception as e:
+            logger.error(f"Error processing WebSocket message: {e}")
+    
+    def _on_error(self, ws, error):
+        """
+        Handle WebSocket error.
+        
+        Args:
+            ws: WebSocket instance
+            error: Error object
+        """
+        logger.error(f"WebSocket error: {error}")
+        
+        if self.on_error_callback:
+            self.on_error_callback(error)
+    
+    def _on_close(self, ws, close_status_code, close_msg):
+        """
+        Handle WebSocket connection close.
+        
+        Args:
+            ws: WebSocket instance
+            close_status_code: Status code
+            close_msg: Close message
+        """
+        logger.info(f"WebSocket connection closed: {close_status_code} - {close_msg}")
+        self.running = False
+
+
+def get_realtime_ticker(symbol: str, timeout: int = 5) -> Optional[Dict[str, Any]]:
+    """
+    Get real-time ticker data from Backpack WebSocket.
+    
+    This is a convenience function that connects to WebSocket,
+    subscribes to ticker, waits for data, and disconnects.
+    
+    Args:
+        symbol: Trading pair symbol (e.g., "SOL_USDC")
+        timeout: Maximum time to wait for data in seconds
+        
+    Returns:
+        Ticker data or None if timeout
+    """
+    ws_client = BackpackWebSocket()
+    
+    try:
+        # Connect and subscribe
+        ws_client.connect()
+        time.sleep(1)  # Wait for connection
+        ws_client.subscribe_ticker(symbol)
+        
+        # Wait for ticker data
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            ticker = ws_client.get_latest_ticker(symbol)
+            if ticker:
+                return ticker
+            time.sleep(0.1)
+        
+        logger.warning(f"Timeout waiting for ticker data for {symbol}")
+        return None
+        
+    finally:
+        ws_client.disconnect()
