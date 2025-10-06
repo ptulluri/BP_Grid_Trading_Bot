@@ -568,4 +568,4 @@ All metrics are logged and can be exported for analysis.
 
 **Disclaimer**: This bot is provided as-is for educational purposes. The authors are not responsible for any financial losses. Always test thoroughly with small amounts before deploying with real funds. Cryptocurrency trading carries significant risk.
 
-**Made with ❤️ for the trading community**
+**Made with ❤️ for the Backpack trading community**
